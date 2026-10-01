@@ -1,14 +1,14 @@
 """Desktop state: which app the user was in, and what its front window is called.
 
 The popup steals focus the moment it appears, so "the frontmost app" has to
-be read when the hotkey fires, not when the question is sent. llm_popup.py
+be read when the hotkey fires, not when the question is sent. quick_ask.py
 already records that app (an NSRunningApplication) in summon(); this module
 takes its name and PID from that object and asks System Events, through
 osascript, for the title of that process's front window.
 
 Permissions: the app name needs none. The window title needs Accessibility
 (System Settings > Privacy & Security > Accessibility) granted to the process
-that runs the app: the terminal when running from source, llm-popup.app when
+that runs the app: the terminal when running from source, quickask.app when
 running the bundle. Without it osascript fails with error -1719 and we carry
 on with just the app name.
 """
@@ -21,8 +21,8 @@ from dataclasses import dataclass, replace
 
 ACCESSIBILITY_HINT = (
     "Window titles need the Accessibility permission. Open System Settings > "
-    "Privacy & Security > Accessibility and enable the app that runs llm-popup "
-    "(your terminal when running from source, llm-popup.app for the built app)."
+    "Privacy & Security > Accessibility and enable the app that runs quickask "
+    "(your terminal when running from source, quickask.app for the built app)."
 )
 
 # System Events errors we tell apart, by message: the numeric code (-1719) is

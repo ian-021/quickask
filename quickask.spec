@@ -1,10 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller recipe for llm-popup.app. Run through build.sh.
+# PyInstaller recipe for quickask.app. Run through build.sh.
 
 from PyInstaller.utils.hooks import collect_submodules
 
 a = Analysis(
-    ["llm_popup.py"],
+    ["quick_ask.py"],
     hiddenimports=collect_submodules("ServiceManagement"),
     # Qt modules the app never imports; keeps the bundle smaller.
     excludes=[
@@ -21,23 +21,23 @@ exe = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
-    name="llm-popup",
+    name="quickask",
     console=False,          # no terminal window
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None, # ad-hoc signature; enough for the machine it is built on
     entitlements_file=None,
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="llm-popup")
+coll = COLLECT(exe, a.binaries, a.datas, name="quickask")
 
 app = BUNDLE(
     coll,
-    name="llm-popup.app",
-    icon="build/icon/llm-popup.icns",
-    bundle_identifier="com.ian.llm-popup",
+    name="quickask.app",
+    icon="build/icon/quickask.icns",
+    bundle_identifier="com.ian.quickask",
     info_plist={
-        "CFBundleName": "llm-popup",
-        "CFBundleDisplayName": "llm-popup",
+        "CFBundleName": "quickask",
+        "CFBundleDisplayName": "quickask",
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1",
         "LSMinimumSystemVersion": "13.0",   # SMAppService (launch at login) needs Ventura

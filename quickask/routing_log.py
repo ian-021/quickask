@@ -5,7 +5,7 @@ router with anything faster than "answer then log". Every line records what
 Jev said and what the popup actually did, so the two can be compared.
 
 Location: logs/routing.jsonl in the repo when running from source, and
-~/.config/llm-popup/logs/routing.jsonl for the built app. QUICKASK_LOG_FILE
+~/.config/quickask/logs/routing.jsonl for the built app. QUICKASK_LOG_FILE
 overrides both.
 """
 

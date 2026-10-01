@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llm-popup: a Spotlight-style popup for trivial questions, answered by Cerebras.
+"""quickask: a Spotlight-style popup for trivial questions, answered by Cerebras.
 
 Press the hotkey, type, press Enter, read the streamed answer, press Esc.
 Everything lives in this one file. Read it top to bottom.
@@ -74,7 +74,7 @@ from PySide6.QtWidgets import (
 # <space>, <f1>... Examples: "<cmd>+<shift>+a", "<ctrl>+<alt>+q".
 HOTKEY = "<cmd>+<space>"
 
-APP_NAME = "llm-popup"
+APP_NAME = "quickask"
 BASE_URL = "https://api.cerebras.ai/v1"
 MODEL = "gpt-oss-120b"
 SYSTEM_PROMPT = (
@@ -97,7 +97,7 @@ def scope_system_prompt(scope):
     return f"{scope.body}\n\n{SYSTEM_PROMPT}"
 
 
-CONFIG_DIR = Path.home() / ".config" / "llm-popup"
+CONFIG_DIR = Path.home() / ".config" / "quickask"
 KEY_FILE = CONFIG_DIR / "key"
 HISTORY_FILE = CONFIG_DIR / "chat_history.yaml"
 # The conversation kept by the hold button, so it survives quitting the app.
@@ -105,7 +105,7 @@ HELD_FILE = CONFIG_DIR / "held_conversation.yaml"
 # Written once the app has registered itself as a login item, so the user's
 # later choice in the menu (or in System Settings) is never overridden.
 LOGIN_ITEM_MARKER = CONFIG_DIR / ".login_item_registered"
-LOG_FILE = Path.home() / "Library" / "Logs" / "llm-popup.log"
+LOG_FILE = Path.home() / "Library" / "Logs" / "quickask.log"
 
 WINDOW_WIDTH = 600
 MAX_ANSWER_HEIGHT = 420  # answer area scrolls beyond this
@@ -470,7 +470,7 @@ class Hotkey(QObject):
         status = c.RegisterEventHotKey(keycode, modifiers, hk_id, target, 0, ctypes.byref(self._ref))
         if status == self._EVENT_HOT_KEY_EXISTS:
             self.error = (f"{hotkey_label(self.spec)} is already taken by another app. "
-                          f"Change HOTKEY in llm_popup.py or free it in that app.")
+                          f"Change HOTKEY in quick_ask.py or free it in that app.")
         elif status != 0:
             self.error = f"Could not register the hotkey (error {status})."
 
@@ -1636,7 +1636,7 @@ def _log_to_file():
 def main():
     if is_bundled():
         _log_to_file()
-    # .env (repo root, or ~/.config/llm-popup/.env for the built app) into the
+    # .env (repo root, or ~/.config/quickask/.env for the built app) into the
     # environment, so CEREBRAS_API_KEY and TYPESAFE_API_KEY kept there are
     # found by the same env-var-first lookups as before.
     config.setup()

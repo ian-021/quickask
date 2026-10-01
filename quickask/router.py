@@ -126,7 +126,7 @@ def route(state, scopes, timeout=None, api_key=None):
 
     api_key = api_key or config.load_typesafe_key()
     if not api_key:
-        return done(error="no TYPESAFE_API_KEY (set it in .env or ~/.config/llm-popup/typesafe_key)")
+        return done(error="no TYPESAFE_API_KEY (set it in .env or ~/.config/quickask/typesafe_key)")
     if not scopes:
         return done(error="no scopes loaded")
 

@@ -2,12 +2,12 @@
 
 Two API keys, loaded the same way:
 
-  CEREBRAS_API_KEY   env var, else ~/.config/llm-popup/key
-  TYPESAFE_API_KEY   env var, else ~/.config/llm-popup/typesafe_key
+  CEREBRAS_API_KEY   env var, else ~/.config/quickask/key
+  TYPESAFE_API_KEY   env var, else ~/.config/quickask/typesafe_key
 
 A .env file is read into the environment at startup (without overriding
 variables that are already set), so keys kept in the repo's .env work when
-running from source. The built app reads ~/.config/llm-popup/.env instead.
+running from source. The built app reads ~/.config/quickask/.env instead.
 No python-dotenv dependency: the format we need is KEY=value, one per line,
 optional quotes, # comments.
 """
@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "llm-popup"
+CONFIG_DIR = Path.home() / ".config" / "quickask"
 TYPESAFE_KEY_FILE = CONFIG_DIR / "typesafe_key"
 
 # Router settings, all overridable from the environment (or .env).

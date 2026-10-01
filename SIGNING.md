@@ -1,14 +1,15 @@
 # Code signing
 
-`build.sh` signs `llm-popup.app` with the certificate named **llm-popup signing**
+`build.sh` signs `quickask.app` with the certificate named **llm-popup signing**
 from the login keychain. It is self-signed, valid until September 2036, and exists
 for one reason: macOS ties privacy grants (Accessibility for window titles,
 Automation for System Events) to the app's signing identity. An ad-hoc signature
 changes on every build and silently loses those grants; a fixed certificate keeps
-them across rebuilds.
+them across rebuilds. The certificate predates the app's rename to quickask and
+keeps its original name, since a certificate's name cannot be changed.
 
 If the certificate is missing, `build.sh` falls back to ad-hoc signing and warns.
-`LLM_POPUP_SIGN_IDENTITY` overrides the certificate name.
+`QUICKASK_SIGN_IDENTITY` overrides the certificate name.
 
 ## Recreate it (new machine)
 
@@ -35,7 +36,7 @@ rm key.pem id.p12 cs.cnf
 security find-identity -v -p codesigning   # should list "llm-popup signing"
 ```
 
-After the first build with a new certificate, grant Accessibility to llm-popup once
+After the first build with a new certificate, grant Accessibility to quickask once
 more in System Settings > Privacy & Security > Accessibility.
 
 ## Remove it

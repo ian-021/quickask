@@ -1,6 +1,6 @@
-"""quickask: scope routing for llm-popup.
+"""quickask: scope routing for the popup.
 
-The popup itself stays in llm_popup.py. This package holds the parts that do
+The popup itself stays in quick_ask.py. This package holds the parts that do
 not need Qt, so they can be run and tested from the command line:
 
   scopes        one markdown file per project, loaded and validated at startup

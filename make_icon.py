@@ -1,5 +1,5 @@
 """Draw the app icon ('?' on a dark rounded square) and write it as .icns.
-Usage: python make_icon.py out/llm-popup.icns
+Usage: python make_icon.py out/quickask.icns
 Used by build.sh; needs only PySide6 and macOS's iconutil."""
 
 import subprocess
@@ -42,7 +42,7 @@ def main(out):
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        iconset = Path(tmp) / "llm-popup.iconset"
+        iconset = Path(tmp) / "quickask.iconset"
         iconset.mkdir()
         for s in SIZES:
             img = draw(s)
@@ -55,4 +55,4 @@ def main(out):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "build/icon/llm-popup.icns")
+    main(sys.argv[1] if len(sys.argv) > 1 else "build/icon/quickask.icns")

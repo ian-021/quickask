@@ -69,14 +69,14 @@ class LoadedScopes:
 
 def default_scopes_dir():
     """The repo's scopes/ folder when running from source. The built .app
-    cannot be edited in place, so it reads ~/.config/llm-popup/scopes instead.
+    cannot be edited in place, so it reads ~/.config/quickask/scopes instead.
     QUICKASK_SCOPES_DIR overrides both."""
     import os
     override = os.environ.get("QUICKASK_SCOPES_DIR")
     if override:
         return Path(override).expanduser()
     if getattr(sys, "frozen", False):
-        return Path.home() / ".config" / "llm-popup" / "scopes"
+        return Path.home() / ".config" / "quickask" / "scopes"
     return Path(__file__).resolve().parent.parent / "scopes"
 
 
