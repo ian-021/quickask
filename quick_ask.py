@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llm-popup: a Spotlight-style popup for trivial questions, answered by Cerebras.
+"""quickask: a Spotlight-style popup for trivial questions, answered by Cerebras.
 
 Press the hotkey, type, press Enter, read the streamed answer, press Esc.
 Everything lives in this one file. Read it top to bottom.
@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+from quickask import config, desktop, router, routing_log
+from quickask.scopes import load_scopes
 from openai import (
     OpenAI,
     APIConnectionError,
@@ -52,6 +54,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QFrame,
     QLabel,
@@ -71,7 +74,7 @@ from PySide6.QtWidgets import (
 # <space>, <f1>... Examples: "<cmd>+<shift>+a", "<ctrl>+<alt>+q".
 HOTKEY = "<cmd>+<space>"
 
-APP_NAME = "llm-popup"
+APP_NAME = "quickask"
 BASE_URL = "https://api.cerebras.ai/v1"
 MODEL = "gpt-oss-120b"
 SYSTEM_PROMPT = (
@@ -85,7 +88,16 @@ SYSTEM_PROMPT = (
     "inline code. Use no other Markdown."
 )
 
-CONFIG_DIR = Path.home() / ".config" / "llm-popup"
+
+
+def scope_system_prompt(scope):
+    """A routed question gets the scope's body as its system prompt. The
+    formatting rules from SYSTEM_PROMPT are appended, because the transcript
+    relies on them (fenced code, Unicode symbols, no other Markdown)."""
+    return f"{scope.body}\n\n{SYSTEM_PROMPT}"
+
+
+CONFIG_DIR = Path.home() / ".config" / "quickask"
 KEY_FILE = CONFIG_DIR / "key"
 HISTORY_FILE = CONFIG_DIR / "chat_history.yaml"
 # The conversation kept by the hold button, so it survives quitting the app.
@@ -93,7 +105,7 @@ HELD_FILE = CONFIG_DIR / "held_conversation.yaml"
 # Written once the app has registered itself as a login item, so the user's
 # later choice in the menu (or in System Settings) is never overridden.
 LOGIN_ITEM_MARKER = CONFIG_DIR / ".login_item_registered"
-LOG_FILE = Path.home() / "Library" / "Logs" / "llm-popup.log"
+LOG_FILE = Path.home() / "Library" / "Logs" / "quickask.log"
 
 WINDOW_WIDTH = 600
 MAX_ANSWER_HEIGHT = 420  # answer area scrolls beyond this
@@ -162,30 +174,35 @@ def append_history(question, answer, follow_up=False):
         _dump_yaml([entry], f)
 
 
-def save_held(exchanges, threaded=False):
-    """Persist the kept conversation: its (question, answer) pairs and
-    whether it was a thread or a one-off. An empty list removes the file."""
+def save_held(exchanges, threaded=False, scope=None):
+    """Persist the kept conversation: its (question, answer) pairs, whether
+    it was a thread or a one-off, and the scope whose context it uses, if
+    any. An empty list removes the file."""
     if not exchanges:
         HELD_FILE.unlink(missing_ok=True)
         return
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    data = {"threaded": threaded,
-            "exchanges": [{"question": q, "answer": a} for q, a in exchanges]}
+    data = {"threaded": threaded}
+    if scope:
+        data["scope"] = scope
+    data["exchanges"] = [{"question": q, "answer": a} for q, a in exchanges]
     with HELD_FILE.open("w", encoding="utf-8") as f:
         _dump_yaml(data, f)
 
 
 def load_held():
-    """-> (exchanges, threaded); ([], False) when nothing is kept."""
+    """-> (exchanges, threaded, scope name or None); ([], False, None) when
+    nothing is kept."""
     if not HELD_FILE.exists():
-        return [], False
+        return [], False, None
     try:
         data = yaml.safe_load(HELD_FILE.read_text(encoding="utf-8")) or {}
         exchanges = [(e["question"], e["answer"]) for e in data.get("exchanges", [])]
-        return exchanges, bool(data.get("threaded"))
+        scope = data.get("scope")
+        return exchanges, bool(data.get("threaded")), (str(scope) if scope else None)
     except Exception as e:
         print(f"could not read {HELD_FILE}: {e}", file=sys.stderr)
-        return [], False
+        return [], False, None
 
 
 def _api_error_text(e):
@@ -245,11 +262,12 @@ class AnswerWorker(QThread):
     # do not pay for a failed request each time.
     drop_reasoning_effort = False
 
-    def __init__(self, api_key, question, context=(), parent=None):
+    def __init__(self, api_key, question, context=(), system_prompt=None, parent=None):
         super().__init__(parent)
         self.api_key = api_key
         self.question = question
         self.context = list(context)  # earlier (question, answer) pairs of the thread
+        self.system_prompt = system_prompt or SYSTEM_PROMPT  # a scope's prompt, or the default
         self._cancelled = threading.Event()
 
     def cancel(self):
@@ -258,7 +276,7 @@ class AnswerWorker(QThread):
         self._cancelled.set()
 
     def _open_stream(self, client):
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": self.system_prompt}]
         for q, a in self.context:
             messages.append({"role": "user", "content": q})
             messages.append({"role": "assistant", "content": a})
@@ -293,6 +311,46 @@ class AnswerWorker(QThread):
             self.failed.emit(f"API error: {_api_error_text(e)}")
         except Exception as e:  # never let a worker exception kill the app
             self.failed.emit(f"Error: {e}")
+
+
+# ------------------------------------------------------------ desktop state --
+class DesktopWorker(QThread):
+    """Fills in the front window title of the app the user came from. Runs
+    osascript, which can take a few hundred ms and may need a permission we
+    do not have, so it happens off the main thread and its result is
+    optional: whatever is known when the question is sent gets used."""
+
+    done = Signal(object)  # DesktopState
+
+    def __init__(self, state, parent=None):
+        super().__init__(parent)
+        self.state = state
+
+    def run(self):
+        try:
+            self.done.emit(desktop.with_window_title(self.state))
+        except Exception as e:  # never let a worker exception kill the app
+            self.done.emit(desktop.DesktopState(app_name=self.state.app_name, pid=self.state.pid,
+                                                error=f"{e}"))
+
+
+# ------------------------------------------------------------------ router --
+class RouterWorker(QThread):
+    """One Jev call on a background thread. route() never raises, so `done`
+    always fires with a RoutingResult; on any failure it carries `error`."""
+
+    done = Signal(object)  # quickask.router.RoutingResult
+
+    def __init__(self, state, scopes, parent=None):
+        super().__init__(parent)
+        self.state = state
+        self.scopes = list(scopes) if scopes else []
+
+    def run(self):
+        try:
+            self.done.emit(router.route(self.state, self.scopes))
+        except Exception as e:  # belt and braces: never let a worker exception kill the app
+            self.done.emit(router.RoutingResult(error=f"router crashed: {e}"))
 
 
 # ------------------------------------------------------------ global hotkey --
@@ -412,7 +470,7 @@ class Hotkey(QObject):
         status = c.RegisterEventHotKey(keycode, modifiers, hk_id, target, 0, ctypes.byref(self._ref))
         if status == self._EVENT_HOT_KEY_EXISTS:
             self.error = (f"{hotkey_label(self.spec)} is already taken by another app. "
-                          f"Change HOTKEY in llm_popup.py or free it in that app.")
+                          f"Change HOTKEY in quick_ask.py or free it in that app.")
         elif status != 0:
             self.error = f"Could not register the hotkey (error {status})."
 
@@ -680,6 +738,16 @@ class ResponseRow(QWidget):
             w.setText(body if kind == "rich" else inline_html(body, self._fonts[1].family()))
 
 
+_BADGE_TIPS = {
+    "scope": "The answer was written with this project's context (its scopes/*.md body) as the system prompt.",
+    "none": "Answered the plain way, with no project context.",
+    "frontier": "Jev thinks a fast small model may get this wrong. Nothing else was called; this is only a hint.",
+    "template": "This scope file still has TODO placeholders. Fill it in so the context means something.",
+    "error": "The router failed or was too slow, so the answer used the plain path.",
+    "pending": "Asking Jev which project this question is about.",
+}
+
+
 class Transcript(QScrollArea):
     """The conversation: questions on the right, answers on the left, a line
     between rounds, newest at the bottom. Grows with its content up to
@@ -748,6 +816,26 @@ class Transcript(QScrollArea):
         r.set_text(text, rich=rich)
         return self._add(r)
 
+    def add_badges(self, badges):
+        """A row of small colored pills under an answer saying which context
+        the answer used and what the router thought. `badges` is a list of
+        (kind, text); `kind` picks the color in the stylesheet: scope, none,
+        frontier, template, error, pending."""
+        row = QWidget()
+        box = QHBoxLayout(row)
+        box.setContentsMargins(0, 2, 0, 0)
+        box.setSpacing(6)
+        for kind, text in badges:
+            label = QLabel(text)
+            label.setObjectName("badge")
+            label.setProperty("kind", kind)
+            label.setTextFormat(Qt.PlainText)
+            label.setFocusPolicy(Qt.NoFocus)
+            label.setToolTip(_BADGE_TIPS.get(kind, ""))
+            box.addWidget(label)
+        box.addStretch()
+        return self._add(row)
+
     def add_separator(self):
         line = QFrame()
         line.setObjectName("separator")
@@ -808,6 +896,7 @@ class Popup(QWidget):
         self.setFixedWidth(WINDOW_WIDTH)
 
         self.worker = None
+        self.scopes = None       # LoadedScopes, set by main() before the first summon
         self.thread = []
         self.threaded = False
         self._question = None
@@ -817,6 +906,19 @@ class Popup(QWidget):
         self._live_row = None     # the ResponseRow receiving streamed tokens
         self._shown_at = 0.0
         self._previous_app = None
+        self._desktop = desktop.DesktopState()  # where the user was at summon time
+        self._desktop_worker = None
+        self._router = None        # RouterWorker whose result this question is waiting for
+        self._router_timer = QTimer(self)  # hard ceiling on that wait
+        self._router_timer.setSingleShot(True)
+        self._router_timer.timeout.connect(self._on_route_timeout)
+        self._pending = None       # (key, question) the router is holding up
+        self._route = None         # RoutingResult for the current question, once known
+        self._route_badges = None  # [(kind, text)] shown under the answer when "use jev" is on
+        # Name of the scope this conversation runs in, once an answer has been
+        # routed to one. Follow-ups reuse it instead of asking Jev again, so
+        # "and why?" cannot lose the project context. Cleared with the thread.
+        self._thread_scope = None
 
         base = QFont()
         self._font_normal = QFont(base)
@@ -831,6 +933,20 @@ class Popup(QWidget):
         self.input.returnPressed.connect(self.submit)
         # textEdited fires for typing, not for our own setText/clear calls.
         self.input.textEdited.connect(self._on_text_edited)
+
+        # "use jev": route the question through Jev before answering. Off by
+        # default, and off means the exact pre-router behavior.
+        self.use_jev = QCheckBox("use jev")
+        self.use_jev.setToolTip("Ask Jev which project this is about and answer with that "
+                                "project's context. Off: answer directly, as before.")
+        self.use_jev.setCursor(Qt.PointingHandCursor)
+        self.use_jev.setFocusPolicy(Qt.NoFocus)  # the caret stays in the input
+        self.input_row = QWidget()
+        row = QHBoxLayout(self.input_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self.input, 1)
+        row.addWidget(self.use_jev)
 
         self.transcript = Transcript(fonts)
         self.transcript.hide()
@@ -856,7 +972,7 @@ class Popup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(8)
-        layout.addWidget(self.input)
+        layout.addWidget(self.input_row)
         layout.addWidget(self.transcript)
         layout.addLayout(self.footer)
 
@@ -867,6 +983,19 @@ class Popup(QWidget):
             QLabel#response {{ color: #e2e2e2; selection-background-color: #3d6be0; }}
             QLabel#response[dim="true"] {{ color: #8a8a8a; }}
             QLabel#question {{ color: #a3a3a3; selection-background-color: #3d6be0; }}
+            QLabel#badge {{ border-radius: 9px; padding: 2px 9px; font-size: 11px; }}
+            QLabel#badge[kind="scope"] {{ background: rgba(111, 149, 255, 0.20); color: #a9c0ff; }}
+            QLabel#badge[kind="none"] {{ background: rgba(255, 255, 255, 0.07); color: #9a9a9f; }}
+            QLabel#badge[kind="pending"] {{ background: rgba(255, 255, 255, 0.07); color: #9a9a9f; }}
+            QLabel#badge[kind="frontier"] {{ background: rgba(255, 184, 77, 0.18); color: #ffc46b; }}
+            QLabel#badge[kind="template"] {{ background: rgba(255, 184, 77, 0.18); color: #ffc46b; }}
+            QLabel#badge[kind="error"] {{ background: rgba(255, 99, 99, 0.16); color: #ff8a8a; }}
+            QCheckBox {{ color: #9a9a9a; font-size: 12px; spacing: 5px; }}
+            QCheckBox:hover {{ color: #ffffff; }}
+            QCheckBox:checked {{ color: #9db5ff; }}
+            QCheckBox::indicator {{ width: 13px; height: 13px; border-radius: 3px;
+                                    border: 1px solid #5a5a60; background: #1d1d20; }}
+            QCheckBox::indicator:checked {{ background: #6f95ff; border-color: #6f95ff; }}
             QFrame#code {{ background: #1d1d20; border-radius: 8px; }}
             QLabel#codetext {{ color: #e6e6e6; selection-background-color: #3d6be0; }}
             QFrame#separator {{ background: #2e2e32; }}
@@ -927,6 +1056,7 @@ class Popup(QWidget):
 
         self._shown_at = time.monotonic()
         self._previous_app = _frontmost_app()  # where focus goes back on dismiss
+        self._capture_desktop(self._previous_app)
         self.show()
         self.raise_()
         # We are an accessory app (no Dock icon) and another app is frontmost.
@@ -944,13 +1074,13 @@ class Popup(QWidget):
                               "it here (it starts with csk-) and press Enter.")
 
     def dismiss(self):
-        if self.worker is not None:
+        if self.worker is not None or self._router is not None:
             # Cancelled mid-answer: drop the incomplete exchange.
             self._cancel_worker()
             self._question = None
             self._streamed = ""
         if self.hold:
-            save_held(self._exchanges(), self.threaded)
+            save_held(self._exchanges(), self.threaded, self._thread_scope)
             self._render()
         else:
             self.clear_conversation()
@@ -967,6 +1097,34 @@ class Popup(QWidget):
                 and time.monotonic() - self._shown_at > 0.3):
             self.dismiss()
 
+    # ---- desktop state ----
+    def _capture_desktop(self, app):
+        """Remember the app the user came from, then fetch its window title in
+        the background. The name is available at once; the title arrives
+        later, or never, and that is fine."""
+        self._desktop = desktop.from_running_app(app)
+        if self._desktop.pid is None:
+            return
+        w = DesktopWorker(self._desktop, parent=self)
+        # `w is self._desktop_worker`: a slow osascript from an earlier summon
+        # must not overwrite the state of this one.
+        w.done.connect(lambda state, w=w: self._on_desktop(w, state))
+        w.finished.connect(w.deleteLater)
+        self._desktop_worker = w
+        w.start()
+
+    def _on_desktop(self, w, state):
+        if w is self._desktop_worker:
+            self._desktop_worker = None
+            self._desktop = state
+            if state.error:
+                print(f"desktop: {state.error}", file=sys.stderr)
+
+    def jev_state(self, question):
+        """The state object for the router: the question plus whatever is
+        known about the desktop right now."""
+        return desktop.build_state(question, self._desktop)
+
     # ---- conversation state ----
     def _exchanges(self):
         """Every completed exchange, the pinned thread plus the latest answer."""
@@ -981,6 +1139,7 @@ class Popup(QWidget):
         self.thread = []
         self._question = None
         self._streamed = ""
+        self._thread_scope = None
         self._set_threaded(False)
         self._render()
         if not self.hold:
@@ -990,15 +1149,26 @@ class Popup(QWidget):
         """Thread mode puts the input under the transcript, so a new question
         is added at the bottom of the conversation."""
         self.threaded = on
-        self.input.setPlaceholderText("Follow up" if on else "Ask anything")
+        self._update_placeholder()
         layout = self.layout()
-        layout.removeWidget(self.input)
+        layout.removeWidget(self.input_row)
         layout.removeWidget(self.transcript)
         layout.removeItem(self.footer)
-        order = [self.transcript, self.input] if on else [self.input, self.transcript]
+        order = [self.transcript, self.input_row] if on else [self.input_row, self.transcript]
         for w in order:
             layout.addWidget(w)
         layout.addLayout(self.footer)
+
+    def _update_placeholder(self):
+        """The empty input names the context a follow-up will use, since the
+        badge under the last answer scrolls away in a long thread."""
+        if not self.threaded:
+            text = "Ask anything"
+        elif self._thread_scope and self.scopes and self.scopes.get(self._thread_scope):
+            text = f"Follow up in {self._thread_scope}"
+        else:
+            text = "Follow up"
+        self.input.setPlaceholderText(text)
 
     def follow_up(self):
         """Continue as thread: pin the current answer and ask the next
@@ -1019,14 +1189,15 @@ class Popup(QWidget):
         change how the conversation works."""
         self.hold = on
         if on:
-            save_held(self._exchanges(), self.threaded)
+            save_held(self._exchanges(), self.threaded, self._thread_scope)
         else:
             save_held([])          # it stays on screen until the popup closes
 
     def _restore_held(self):
-        exchanges, threaded = load_held()
+        exchanges, threaded, scope = load_held()
         if not exchanges:
             return
+        self._thread_scope = scope  # resolved against self.scopes when next used
         self.hold_btn.blockSignals(True)
         self.hold_btn.setChecked(True)
         self.hold_btn.blockSignals(False)
@@ -1114,11 +1285,50 @@ class Popup(QWidget):
             self.input.clear()
         self._question = question
         self._streamed = ""
+        self._route = None
+        self._route_badges = None
         self._render()  # reveals the answer area right away
 
+        thread_scope = self._current_thread_scope()
+        if thread_scope is not None:
+            # A follow-up in a conversation that already has a project's
+            # context: keep it, no routing. Jev still runs in the shadow.
+            self._route_badges = self._thread_badges(thread_scope)
+            self._render()
+            self._answer(key, question, thread_scope)
+            self._shadow_route(question, f"scope:{thread_scope.name}")
+        elif self.use_jev.isChecked():
+            self._route_then_answer(key, question)
+        else:
+            self._answer(key, question)       # the pre-router path, started first
+            self._shadow_route(question)      # then Jev, in the background, only logged
+
+    def _current_thread_scope(self):
+        """The Scope a follow-up should reuse, or None. Only in thread mode:
+        a one-off re-asked from the box is routed afresh."""
+        if not self.threaded or not self._thread_scope or not self.scopes:
+            return None
+        scope = self.scopes.get(self._thread_scope)
+        if scope is None or scope.is_template:
+            print(f"thread scope {self._thread_scope!r} missing or still a template; routing again",
+                  file=sys.stderr)
+            self._thread_scope = None
+            return None
+        return scope
+
+    def _thread_badges(self, scope):
+        badges = [("scope", f"Using context: {scope.name} · thread")]
+        if scope.is_template:
+            badges.append(("template", f"{scope.name}.md is still a template"))
+        return badges
+
+    def _answer(self, key, question, scope=None):
+        """Start streaming the answer. With a scope, its body is the system
+        prompt; without, this is the pre-router path unchanged."""
+        system_prompt = scope_system_prompt(scope) if scope else None
         # parent=self keeps the QThread alive (Qt owns it); deleteLater once it
         # finishes so cancelled workers do not pile up.
-        w = AnswerWorker(key, question, context=self.thread, parent=self)
+        w = AnswerWorker(key, question, context=self.thread, system_prompt=system_prompt, parent=self)
         # Each slot checks `w is self.worker` because a cancelled worker can
         # still have a token or two queued when the next question starts.
         w.token.connect(lambda text, w=w: self._on_token(w, text))
@@ -1128,10 +1338,115 @@ class Popup(QWidget):
         self.worker = w
         w.start()
 
+    # ---- shadow routing ("use jev" unchecked) ----
+    def _shadow_route(self, question, path="default"):
+        """Run the same Jev call the checked path would, but only to log it.
+        Nothing here touches the conversation or the widgets: the answer is
+        already streaming and is not waiting on this. `path` is what actually
+        ran: "default", or "scope:<name>" for a follow-up in a scoped thread."""
+        snapshot = self._desktop
+        follow_up = bool(self.thread)
+        use_jev = self.use_jev.isChecked()
+        w = RouterWorker(self.jev_state(question), self.scopes, parent=self)
+        w.done.connect(lambda result: self._log_route(question, snapshot, use_jev, result,
+                                                      path, follow_up))
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _log_route(self, question, snapshot, use_jev, result, path, follow_up):
+        entry = routing_log.make_entry(question, snapshot, use_jev, result, path, follow_up)
+        routing_log.append(entry)
+
+    # ---- routing ("use jev" checked) ----
+    def _route_then_answer(self, key, question):
+        """Ask Jev first, then answer with the chosen scope's context. The
+        wait is bounded twice: the SDK's own timeout, and a UI timer a little
+        above it, so a stuck call can never hold the answer hostage."""
+        self._route_badges = [("pending", "Asking Jev which project this is about…")]
+        self._render()
+        w = RouterWorker(self.jev_state(question), self.scopes, parent=self)
+        w.done.connect(lambda result, w=w: self._on_routed(w, result, key, question))
+        w.finished.connect(w.deleteLater)
+        self._router = w
+        self._pending = (key, question)
+        self._router_timer.start(int((config.ROUTER_TIMEOUT + 0.25) * 1000))
+        w.start()
+
+    def _on_routed(self, w, result, key, question):
+        if w is not self._router:
+            return  # superseded by a newer question, cancelled, or timed out
+        self._router = None
+        self._pending = None
+        self._router_timer.stop()
+        self._route = result
+        scope = None
+        if result.routed and result.scope_confidence >= config.SCOPE_THRESHOLD:
+            scope = self.scopes.get(result.scope)
+        if scope is not None and scope.is_template:
+            # Matched, but the file is still placeholder text: sending that as
+            # the system prompt would only invite made-up answers. Say what
+            # matched and answer the plain way.
+            self._route_badges = self._route_badges_for(result, None, template=scope)
+            scope = None
+        else:
+            self._route_badges = self._route_badges_for(result, scope)
+        if scope is not None:
+            self._thread_scope = scope.name   # follow-ups keep this context
+            self._update_placeholder()
+        self._log_route(question, self._desktop, True, result,
+                        f"scope:{scope.name}" if scope else "default", bool(self.thread))
+        self._render()
+        self._answer(key, question, scope)
+
+    def _on_route_timeout(self):
+        if self._router is None or self._pending is None:
+            return
+        key, question = self._pending
+        self._router = None
+        self._pending = None
+        result = router.RoutingResult(error=f"jev did not answer within {config.ROUTER_TIMEOUT}s",
+                                      latency_ms=int((config.ROUTER_TIMEOUT + 0.25) * 1000))
+        self._route = result
+        self._route_badges = self._route_badges_for(result, None)
+        self._log_route(question, self._desktop, True, result, "default", bool(self.thread))
+        self._render()
+        self._answer(key, question)
+
+    def _route_badges_for(self, result, scope, template=None):
+        """The pills under the answer: which context was used, and why.
+        `template` is a matched scope that was not used because its file is
+        still a template."""
+        badges = []
+        if result.error:
+            badges.append(("error", f"Router off: {result.error} · plain answer"))
+            return badges
+        if template is not None:
+            badges.append(("template", f"Matched {template.name} · {result.scope_confidence:.2f} "
+                                       f"· {template.name}.md is still a template · plain answer"))
+        elif scope is not None:
+            badges.append(("scope", f"Using context: {scope.name} · {result.scope_confidence:.2f} "
+                                    f"· {result.latency_ms} ms"))
+            if scope.is_template:
+                badges.append(("template", f"{scope.name}.md is still a template"))
+        elif result.scope != router.NONE:
+            badges.append(("none", f"No project context · {result.scope} {result.scope_confidence:.2f} "
+                                   f"is under {config.SCOPE_THRESHOLD:g} · {result.latency_ms} ms"))
+        else:
+            badges.append(("none", f"No project context · none {result.scope_confidence:.2f} "
+                                   f"· {result.latency_ms} ms"))
+        if result.needs_frontier_prob >= config.FRONTIER_THRESHOLD:
+            badges.append(("frontier", f"This might need Claude · {result.needs_frontier_prob:.2f}"))
+        return badges
+
     def _cancel_worker(self):
         if self.worker is not None:
             self.worker.cancel()
             self.worker = None
+        # A pending routing call is dropped the same way: its result is
+        # ignored when it arrives (see the `w is self._router` checks).
+        self._router = None
+        self._pending = None
+        self._router_timer.stop()
 
     def _on_token(self, w, text):
         if w is self.worker:
@@ -1153,7 +1468,7 @@ class Popup(QWidget):
             if self._streamed:
                 append_history(w.question, self._streamed, follow_up=bool(self.thread))
                 if self.hold:
-                    save_held(self._exchanges(), self.threaded)
+                    save_held(self._exchanges(), self.threaded, self._thread_scope)
                 self._render()  # "Continue as thread" appears now that the answer is complete
 
     # ---- transcript ----
@@ -1186,6 +1501,8 @@ class Popup(QWidget):
                     self.transcript.add_separator()
                 self.transcript.add_question(self._question)
             self._live_row = self.transcript.add_response(self._streamed)
+            if self._route_badges:
+                self.transcript.add_badges(self._route_badges)
         has_content = bool(self.thread) or self._question is not None
         self.transcript.setVisible(has_content)
         # "Continue as thread" only for a finished one-off answer; hold
@@ -1319,6 +1636,10 @@ def _log_to_file():
 def main():
     if is_bundled():
         _log_to_file()
+    # .env (repo root, or ~/.config/quickask/.env for the built app) into the
+    # environment, so CEREBRAS_API_KEY and TYPESAFE_API_KEY kept there are
+    # found by the same env-var-first lookups as before.
+    config.setup()
     # Qt would otherwise turn this bare Python process into a regular app with
     # a Dock icon at startup. Skip that; we set the accessory policy ourselves.
     os.environ.setdefault("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM", "1")
@@ -1328,6 +1649,12 @@ def main():
     _hide_dock_icon()
 
     popup = Popup()  # created once, kept hidden, so summoning is instant
+    # Scopes are read once here. A bad file is reported (log and, below, the
+    # popup) but never stops the app: the default path needs no scopes.
+    popup.scopes = load_scopes()
+    for err in popup.scopes.errors:
+        print(f"scopes: {err}", file=sys.stderr)
+    popup._update_placeholder()  # a restored thread may name a scope
     menu_bar = MenuBar(app, popup)  # noqa: F841  (kept alive for the app's lifetime)
 
     hotkey = Hotkey()
@@ -1339,6 +1666,9 @@ def main():
         print(hotkey.error, file=sys.stderr)
         popup.summon()
         popup.show_message(hotkey.error)
+    elif popup.scopes.errors:
+        popup.summon()
+        popup.show_message("Some scope files were skipped:\n" + "\n".join(popup.scopes.errors))
 
     LoginItem.register_once()
 

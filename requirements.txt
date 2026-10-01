@@ -3,3 +3,4 @@ openai>=1.50
 PyYAML>=6.0
 pyobjc-framework-Cocoa>=10
 pyobjc-framework-ServiceManagement>=10
+typesafe-sdk>=0.7
